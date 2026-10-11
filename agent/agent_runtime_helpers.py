@@ -3259,9 +3259,20 @@ _ACK_ANNOUNCE_RE = re.compile(
 # imminent action. Suppress even when an action word co-occurs.
 _ACK_OFFER_RE = re.compile(
     r"\b(?:let me know|if you['’]?d\s+like|if you\s+want|if you['’]?d\s+prefer|"
-    r"would you like|feel free to|happy to help)\b"
+    r"would you like|feel free to|happy to help|"
+    r"another time|some other time|at a later|later on|next week|not now)\b"
 )
 
+# The model is blocked on the user (approval, credentials, a go-ahead) or reports the
+# request complete: the announcement is conditional or moot, not an unstarted action.
+# A question mark ends a question only before whitespace/closer, not inside a URL query.
+_ACK_QUESTION_RE = re.compile(r"\?(?=\s|$|[\"'’”)\\])")
+_ACK_WAIT_RE = re.compile(
+    r"\b(?:never|(?:once|when|after|until)\s+you|"
+    r"(?:once|when|after|until)\s+the\s+[\w\s-]{0,30}?\b(?:finish(?:es|ed)|complet(?:es|ed))|your\s+(?:approval|permission|confirmation)|"
+    r"go.ahead|credentials?|password|"
+    r"(?:review|task|work|request(?:ed)?\s+\w+)\s+(?:is|was)\s+(?:now\s+)?(?:complete|done|finished))\b"
+)
 
 def looks_like_codex_intermediate_ack(
     agent, user_message: Any, assistant_content: str, messages: list[dict[str, Any]],
@@ -3289,6 +3300,34 @@ def looks_like_codex_intermediate_ack(
     fires — the verb match cannot see the object; the mode is meant for
     autonomous task sessions, and codex_only's workspace requirement avoids it.
     """
+    # Answered-clarification turn: the only tool work this turn was ``clarify``, so
+    # the request is still unstarted. Judge the announcement against the resolved
+    # request and skip the after-tool gate; decline/wait/terminal wording, and any
+    # other tool call this turn, fall through to the normal (stricter) paths.
+    from agent import intent_ack as _ia
+    from agent.codex_responses_adapter import _summarize_user_message_for_log as _sum
+
+    _user_text = _sum(user_message).strip().lower()
+    if _ia.has_unresolved_clarification(messages):
+        return False
+    _clar_text = _ia.clarification_ack(_user_text, messages)
+    if _clar_text is not None:
+        _clar_assistant = agent._strip_think_blocks(assistant_content or "").strip().lower()
+        if not _clar_assistant or len(_clar_assistant) > 1200:
+            return False
+        if _ia.terminal_or_question(_clar_assistant):
+            return False
+        _prose = _ia.unquoted_prose(_clar_assistant)
+        if not (_ia.clarified_ack_signal(_prose) or _ACK_ANNOUNCE_RE.search(_prose)):
+            return False
+        if not require_workspace:
+            return True
+        return (
+            any(m in _clar_text for m in _ACK_WORKSPACE_MARKERS)
+            or "/" in _clar_text
+            or any(m in _prose for m in _ACK_WORKSPACE_MARKERS)
+        )
+
     # Prior-tool gate. NEVER scan the whole `messages` history: the store keeps a
     # role=="tool" row for every past tool call, so a full-history scan dead-shorts
     # the detector in any established session that has ever used a tool.
@@ -3305,10 +3344,13 @@ def looks_like_codex_intermediate_ack(
     # detector never fires on). So a first-response ack is caught in both modes,
     # and a mid-task "let me finish it:" ack is caught only when opted in.
     if require_workspace:
+        # Runtime scaffolding (verification/continuation nudges, compaction summaries)
+        # is role="user" but not a new request; it must not hide this turn's tool work.
+        from agent.conversation_compression import _is_real_user_message
         _turn_msgs = messages
         for _i in range(len(messages) - 1, -1, -1):
             _m = messages[_i]
-            if isinstance(_m, dict) and _m.get("role") == "user":
+            if _is_real_user_message(_m):
                 _turn_msgs = messages[_i + 1:]
                 break
         if any(isinstance(msg, dict) and msg.get("role") == "tool" for msg in _turn_msgs):
@@ -3318,11 +3360,17 @@ def looks_like_codex_intermediate_ack(
     if not assistant_text or len(assistant_text) > 1200:
         return False
 
+    # Quoted examples, blockquotes and code are content, not the model's own commitment.
+    assistant_text = _ia.unquoted_prose(assistant_text)
+    if not assistant_text.strip():
+        return False
+
     # Sign-off / conditional-offer / question-for-input: the model is offering
     # future help, reporting finished work, or asking the user for input — not
     # announcing an imminent action. Suppress in every mode even when an action
     # word co-occurs ("Let me know if you'd like me to create more examples.").
-    if _ACK_OFFER_RE.search(assistant_text):
+    if (_ACK_QUESTION_RE.search(assistant_text) or _ACK_OFFER_RE.search(assistant_text)
+            or _ACK_WAIT_RE.search(assistant_text)):
         return False
 
     # Some tool-using providers narrate the next action in terse log style
@@ -3475,18 +3523,16 @@ def looks_like_codex_intermediate_ack(
     # coincidences ("I'll admit, building rapport"; "in the long run"). Also fire
     # on a truncated colon ending that still carries a future-ack + action verb,
     # for local phrasings that dodge the governed pattern.
+    # Both modes share the governed detection; codex_only additionally needs a
+    # workspace reference (below).
+    if not (
+        _ACK_ANNOUNCE_RE.search(assistant_text)
+        or (looks_truncated and has_future_ack and assistant_mentions_action)
+        or has_pronounless_action
+    ):
+        return False
     if not require_workspace:
-        if _ACK_ANNOUNCE_RE.search(assistant_text):
-            return True
-        if looks_truncated and has_future_ack and assistant_mentions_action:
-            return True
-        return has_pronounless_action
-
-    # codex_only path: future-ack + action verb (+ workspace reference below).
-    if not (has_future_ack or has_pronounless_action):
-        return False
-    if not (assistant_mentions_action or has_pronounless_action):
-        return False
+        return True
 
     # ``user_message`` is typed ``str`` but can arrive as an OpenAI-style
     # multi-part content list (``[{type:"text",...}, {type:"image_url",...}]``)
