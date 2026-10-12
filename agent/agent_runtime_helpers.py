@@ -3308,6 +3308,15 @@ def looks_like_codex_intermediate_ack(
     from agent.codex_responses_adapter import _summarize_user_message_for_log as _sum
 
     _user_text = _sum(user_message).strip().lower()
+    # An explicit refusal governs the whole turn, so this is checked before the
+    # clarification and general paths diverge. The guard already existed inside
+    # _ia.clarification_ack, which only runs on an answered-clarification turn;
+    # the general path never consulted it, so a declined request still produced a
+    # continuation signal. Reported by @cygnostik on #69779: at 14b330c3 both
+    # require_workspace values returned False for the repro, at 40193d60 both
+    # returned True.
+    if _ia.user_declined(_user_text):
+        return False
     if _ia.has_unresolved_clarification(messages):
         return False
     _clar_text = _ia.clarification_ack(_user_text, messages)

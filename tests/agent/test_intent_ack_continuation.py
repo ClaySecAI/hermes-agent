@@ -509,3 +509,49 @@ def test_all_mode_continues_after_a_tool_already_ran():
         a, REPRO_USER, REPRO_ACK, msgs, require_workspace=False
     )
 
+
+
+def test_explicit_user_decline_suppresses_on_both_paths():
+    """An explicit refusal governs the turn: never continue against it.
+
+    Regression test for #69779 (reported by @cygnostik). ``_DECLINED_RE`` was
+    applied only inside ``intent_ack.clarification_ack``, which runs on an
+    answered-clarification turn. On the general path the detector never consulted
+    it, so a declined request still produced a continuation signal. Both
+    ``require_workspace`` values are asserted because the opted-in path returns
+    before the workspace check that is the only other place user text is read.
+
+    Verbatim repro from the report: False at 14b330c3, True at 40193d60.
+    """
+    ag = _agent(True, "chat_completions", "ornith-35b")
+    user = "Do not inspect the project yet."
+    msgs = [{"role": "user", "content": user}]
+    for require_workspace in (True, False):
+        assert not looks_like_codex_intermediate_ack(
+            ag, user, "I'll inspect the files.", msgs,
+            require_workspace=require_workspace,
+        ), f"continued against an explicit decline (require_workspace={require_workspace})"
+
+
+def test_scoped_decline_suppresses():
+    """A refusal scoped to part of the request still suppresses: "explain X; do
+    not edit anything" must not license an edit announcement. Also from the
+    14b330c3 negative table."""
+    ag = _agent(True, "chat_completions", "ornith-35b")
+    user = "Explain the project options; do not edit anything."
+    assert not looks_like_codex_intermediate_ack(
+        ag, user, "I'll update the project files.",
+        [{"role": "user", "content": user}], require_workspace=False,
+    )
+
+
+def test_decline_guard_does_not_suppress_an_ordinary_request():
+    """The inverse the original table did not assert: a plain request with no
+    refusal wording still fires, so restoring the guard cannot silently disable
+    continuation altogether."""
+    ag = _agent(True, "chat_completions", "ornith-35b")
+    user = "Please inspect the project and report what you find."
+    assert looks_like_codex_intermediate_ack(
+        ag, user, "I'll inspect the files.",
+        [{"role": "user", "content": user}], require_workspace=False,
+    )

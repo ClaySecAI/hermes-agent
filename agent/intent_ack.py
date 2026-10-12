@@ -237,3 +237,14 @@ def terminal_or_question(assistant_text: str) -> bool:
 
 def unquoted_prose(text: str) -> str:
     return _unquoted_prose(text)
+
+def user_declined(user_text: str) -> bool:
+    """Did the user explicitly refuse, defer or gate the work this turn?
+
+    ``_DECLINED_RE`` was already applied inside :func:`clarification_ack`, which
+    only runs on an answered-clarification turn. The general detector path never
+    consulted it, so "do not inspect the project yet" / "I'll inspect the files"
+    produced a continuation signal (#69779, reported by @cygnostik). Exposed here
+    so both paths share one definition rather than a second copy of the pattern.
+    """
+    return bool(_DECLINED_RE.search(user_text))
